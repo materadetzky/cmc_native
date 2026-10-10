@@ -59,7 +59,7 @@ Future<void> _initNotifications() async {
   }
 }
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
 
   // Set system navigation and status bar style for sleek dark glassmorphism
@@ -73,8 +73,6 @@ void main() async {
       systemNavigationBarDividerColor: Colors.transparent,
     ),
   );
-
-  await _initNotifications();
 
   runApp(const CmcNativeApp());
 }
@@ -120,158 +118,151 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
 
   static const String _nativeBridgeJsScript = r'''
 (function() {
-  if (window._cmcNativeBridgeActive) return;
-  window._cmcNativeBridgeActive = true;
+  try {
+    if (window._cmcNativeBridgeActive) return;
+    window._cmcNativeBridgeActive = true;
 
-  // 1. Polyfill window.Notification API
-  function CmcNativeNotification(title, options) {
-    options = options || {};
-    this.title = title || 'CMC.CENTER';
-    this.body = options.body || '';
-    this.icon = options.icon || '';
-    this.tag = options.tag || '';
-    this.data = options.data || {};
+    // 1. Safe window.Notification Polyfill
+    function CmcNativeNotification(title, options) {
+      options = options || {};
+      this.title = title || 'CMC.CENTER';
+      this.body = options.body || '';
+      this.icon = options.icon || '';
+      this.tag = options.tag || '';
+      this.data = options.data || {};
 
-    try {
-      if (window.CmcNativeBridge) {
-        window.CmcNativeBridge.postMessage(JSON.stringify({
-          type: 'SHOW_NOTIFICATION',
-          title: this.title,
-          body: this.body,
-          icon: this.icon,
-          tag: this.tag,
-          data: this.data
-        }));
-      }
-    } catch(e) {
-      console.error('[CMC NATIVE] Notification trigger error:', e);
-    }
-  }
-
-  CmcNativeNotification.permission = 'granted';
-  CmcNativeNotification.maxActions = 2;
-  CmcNativeNotification.requestPermission = function(cb) {
-    try {
-      if (window.CmcNativeBridge) {
-        window.CmcNativeBridge.postMessage(JSON.stringify({
-          type: 'REQUEST_NOTIFICATION_PERMISSION'
-        }));
-      }
-    } catch(e) {}
-    if (typeof cb === 'function') cb('granted');
-    return Promise.resolve('granted');
-  };
-
-  window.Notification = CmcNativeNotification;
-
-  // 2. Polyfill PushManager & ServiceWorker registration for push subscriptions
-  var deviceId = localStorage.getItem('cmc_native_device_id');
-  if (!deviceId) {
-    deviceId = 'native_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8);
-    localStorage.setItem('cmc_native_device_id', deviceId);
-  }
-
-  var nativePushSub = {
-    endpoint: 'https://center.cisztermedia-szfvar.hu/api/pwa/native/' + deviceId,
-    expirationTime: null,
-    options: {
-      userVisibleOnly: true,
-      applicationServerKey: null
-    },
-    toJSON: function() {
-      return {
-        endpoint: this.endpoint,
-        expirationTime: null,
-        keys: {
-          p256dh: 'BCmCNativePushPolyfillP256dhKeyForNativeAppNotifications2026',
-          auth: 'NativeAuthSecret2026'
-        }
-      };
-    },
-    getKey: function(k) {
-      return new Uint8Array([1, 2, 3, 4]);
-    },
-    unsubscribe: function() {
-      localStorage.setItem('push_notifications_enabled', 'false');
       try {
         if (window.CmcNativeBridge) {
           window.CmcNativeBridge.postMessage(JSON.stringify({
-            type: 'PUSH_UNSUBSCRIBE'
+            type: 'SHOW_NOTIFICATION',
+            title: this.title,
+            body: this.body,
+            icon: this.icon,
+            tag: this.tag,
+            data: this.data
           }));
         }
       } catch(e) {}
-      return Promise.resolve(true);
     }
-  };
 
-  var nativePushManager = {
-    getSubscription: function() {
-      var enabled = localStorage.getItem('push_notifications_enabled') === 'true';
-      return Promise.resolve(enabled ? nativePushSub : null);
-    },
-    subscribe: function(opts) {
-      localStorage.setItem('push_notifications_enabled', 'true');
+    CmcNativeNotification.permission = 'granted';
+    CmcNativeNotification.maxActions = 2;
+    CmcNativeNotification.requestPermission = function(cb) {
       try {
         if (window.CmcNativeBridge) {
           window.CmcNativeBridge.postMessage(JSON.stringify({
-            type: 'PUSH_SUBSCRIBE',
-            endpoint: nativePushSub.endpoint
+            type: 'REQUEST_NOTIFICATION_PERMISSION'
           }));
         }
       } catch(e) {}
-      return Promise.resolve(nativePushSub);
-    },
-    permissionState: function() {
+      if (typeof cb === 'function') cb('granted');
       return Promise.resolve('granted');
+    };
+
+    window.Notification = CmcNativeNotification;
+
+    // 2. Safe PushManager Mock for ServiceWorker registrations
+    var deviceId = localStorage.getItem('cmc_native_device_id');
+    if (!deviceId) {
+      deviceId = 'native_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8);
+      localStorage.setItem('cmc_native_device_id', deviceId);
     }
-  };
 
-  var nativeRegistration = {
-    pushManager: nativePushManager,
-    showNotification: function(title, options) {
-      new window.Notification(title, options);
-      return Promise.resolve();
-    },
-    getNotifications: function() { return Promise.resolve([]); },
-    active: { postMessage: function() {} },
-    scope: '/'
-  };
-
-  if (!navigator.serviceWorker) {
-    navigator.serviceWorker = {};
-  }
-  navigator.serviceWorker.ready = Promise.resolve(nativeRegistration);
-  navigator.serviceWorker.getRegistration = function() {
-    return Promise.resolve(nativeRegistration);
-  };
-
-  // 3. Connect real-time alerts and messages to native notification tray
-  var origAddToast = window.addToast;
-  window.addToast = function(msg, type) {
-    if (typeof origAddToast === 'function') {
-      origAddToast(msg, type);
-    }
-    try {
-      if (window.CmcNativeBridge && localStorage.getItem('push_notifications_enabled') !== 'false') {
-        window.CmcNativeBridge.postMessage(JSON.stringify({
-          type: 'SHOW_NOTIFICATION',
-          title: 'CMC.CENTER',
-          body: msg || 'Új értesítés',
-          data: { url: '/' }
-        }));
+    var nativePushSub = {
+      endpoint: 'https://center.cisztermedia-szfvar.hu/api/pwa/native/' + deviceId,
+      expirationTime: null,
+      options: { userVisibleOnly: true, applicationServerKey: null },
+      toJSON: function() {
+        return {
+          endpoint: this.endpoint,
+          expirationTime: null,
+          keys: {
+            p256dh: 'BCmCNativePushPolyfillP256dhKeyForNativeAppNotifications2026',
+            auth: 'NativeAuthSecret2026'
+          }
+        };
+      },
+      getKey: function(k) { return new Uint8Array([1, 2, 3, 4]); },
+      unsubscribe: function() {
+        localStorage.setItem('push_notifications_enabled', 'false');
+        try {
+          if (window.CmcNativeBridge) {
+            window.CmcNativeBridge.postMessage(JSON.stringify({ type: 'PUSH_UNSUBSCRIBE' }));
+          }
+        } catch(e) {}
+        return Promise.resolve(true);
       }
-    } catch(e) {}
-  };
+    };
 
-  // 4. Global testing method
-  window.sendCmcNativePush = function(title, body, url) {
-    new window.Notification(title || 'CMC.CENTER', {
-      body: body || 'Teszt értesítés a natív appból',
-      data: { url: url || '/' }
-    });
-  };
+    var nativePushManager = {
+      getSubscription: function() {
+        var enabled = localStorage.getItem('push_notifications_enabled') === 'true';
+        return Promise.resolve(enabled ? nativePushSub : null);
+      },
+      subscribe: function(opts) {
+        localStorage.setItem('push_notifications_enabled', 'true');
+        try {
+          if (window.CmcNativeBridge) {
+            window.CmcNativeBridge.postMessage(JSON.stringify({
+              type: 'PUSH_SUBSCRIBE',
+              endpoint: nativePushSub.endpoint
+            }));
+          }
+        } catch(e) {}
+        return Promise.resolve(nativePushSub);
+      },
+      permissionState: function() { return Promise.resolve('granted'); }
+    };
 
-  console.log('[CMC NATIVE] ✅ Notification and Web Push Bridge active.');
+    // Safely augment ServiceWorkerRegistration prototype if available
+    if (typeof ServiceWorkerRegistration !== 'undefined') {
+      try {
+        Object.defineProperty(ServiceWorkerRegistration.prototype, 'pushManager', {
+          get: function() { return nativePushManager; },
+          configurable: true
+        });
+      } catch(e) {}
+    }
+
+    // Safely attach to navigator.serviceWorker.ready if available
+    if (typeof navigator !== 'undefined' && navigator.serviceWorker && navigator.serviceWorker.ready) {
+      navigator.serviceWorker.ready.then(function(reg) {
+        if (reg && !reg.pushManager) {
+          try { reg.pushManager = nativePushManager; } catch(e) {}
+        }
+      }).catch(function() {});
+    }
+
+    // 3. Connect real-time alert and toast notifications to phone notification tray
+    if (typeof window.addToast === 'function') {
+      var origAddToast = window.addToast;
+      window.addToast = function(msg, type) {
+        origAddToast(msg, type);
+        try {
+          if (window.CmcNativeBridge && localStorage.getItem('push_notifications_enabled') !== 'false') {
+            window.CmcNativeBridge.postMessage(JSON.stringify({
+              type: 'SHOW_NOTIFICATION',
+              title: 'CMC.CENTER',
+              body: msg || 'Új értesítés',
+              data: { url: '/' }
+            }));
+          }
+        } catch(e) {}
+      };
+    }
+
+    // 4. Global testing method
+    window.sendCmcNativePush = function(title, body, url) {
+      new window.Notification(title || 'CMC.CENTER', {
+        body: body || 'Teszt értesítés a natív appból',
+        data: { url: url || '/' }
+      });
+    };
+
+    console.log('[CMC NATIVE] ✅ Notification and Web Push Bridge active.');
+  } catch(err) {
+    console.warn('[CMC NATIVE BRIDGE] Initialization note:', err);
+  }
 })();
 ''';
 
@@ -279,6 +270,7 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
   void initState() {
     super.initState();
     _globalNotificationNavigate = _handleNotificationNavigation;
+    _initNotifications();
     _requestAppPermissions();
     _initializeWebViewController();
   }
@@ -318,39 +310,43 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
     required String body,
     String? payload,
   }) async {
-    const AndroidNotificationDetails androidPlatformChannelSpecifics =
-        AndroidNotificationDetails(
-      'cmc_center_notifications',
-      'CMC.CENTER Értesítések',
-      channelDescription: 'Valós idejű push értesítések és rendszerriasztások',
-      importance: Importance.max,
-      priority: Priority.high,
-      showWhen: true,
-      playSound: true,
-      enableVibration: true,
-      color: Color(0xFF00F0FF),
-      icon: '@mipmap/ic_launcher',
-    );
+    try {
+      const AndroidNotificationDetails androidPlatformChannelSpecifics =
+          AndroidNotificationDetails(
+        'cmc_center_notifications',
+        'CMC.CENTER Értesítések',
+        channelDescription: 'Valós idejű push értesítések és rendszerriasztások',
+        importance: Importance.max,
+        priority: Priority.high,
+        showWhen: true,
+        playSound: true,
+        enableVibration: true,
+        color: Color(0xFF00F0FF),
+        icon: '@mipmap/ic_launcher',
+      );
 
-    const DarwinNotificationDetails darwinPlatformChannelSpecifics =
-        DarwinNotificationDetails(
-      presentAlert: true,
-      presentBadge: true,
-      presentSound: true,
-    );
+      const DarwinNotificationDetails darwinPlatformChannelSpecifics =
+          DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      );
 
-    const NotificationDetails platformChannelSpecifics = NotificationDetails(
-      android: androidPlatformChannelSpecifics,
-      iOS: darwinPlatformChannelSpecifics,
-    );
+      const NotificationDetails platformChannelSpecifics = NotificationDetails(
+        android: androidPlatformChannelSpecifics,
+        iOS: darwinPlatformChannelSpecifics,
+      );
 
-    await flutterLocalNotificationsPlugin.show(
-      id: id,
-      title: title,
-      body: body,
-      notificationDetails: platformChannelSpecifics,
-      payload: payload,
-    );
+      await flutterLocalNotificationsPlugin.show(
+        id: id,
+        title: title,
+        body: body,
+        notificationDetails: platformChannelSpecifics,
+        payload: payload,
+      );
+    } catch (e) {
+      debugPrint('[CMC NOTIFICATIONS] Show error: $e');
+    }
   }
 
   Future<void> _handleBridgeMessage(String rawJson) async {
@@ -427,9 +423,6 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
             setState(() {
               _loadingProgress = progress / 100.0;
             });
-            if (progress > 30) {
-              _injectBridgeScript();
-            }
           },
           onPageStarted: (String url) {
             setState(() {
@@ -437,7 +430,6 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
               _hasError = false;
               _errorMessage = '';
             });
-            _injectBridgeScript();
           },
           onPageFinished: (String url) {
             setState(() {
@@ -585,8 +577,8 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
                   ),
                 ),
 
-              // Fullscreen initial splash / loading overlay
-              if (_isLoading && _loadingProgress < 0.4)
+              // Fullscreen splash / loading overlay (displayed while the page is actively loading)
+              if (_isLoading && !_hasError)
                 Positioned.fill(
                   child: Container(
                     color: const Color(0xFF0D1117),

@@ -268,32 +268,7 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Container(
-                            width: 88,
-                            height: 88,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              boxShadow: [
-                                BoxShadow(
-                                  color: const Color(0xFF00F0FF).withValues(alpha: 0.25),
-                                  blurRadius: 30,
-                                  spreadRadius: 5,
-                                ),
-                              ],
-                            ),
-                            child: ClipOval(
-                              child: Image.asset(
-                                'assets/icon.png',
-                                fit: BoxFit.cover,
-                                errorBuilder: (context, error, stackTrace) =>
-                                    const Icon(
-                                  Icons.shield,
-                                  size: 60,
-                                  color: Color(0xFF00F0FF),
-                                ),
-                              ),
-                            ),
-                          ),
+                          const CmcLogoWidget(size: 96),
                           const SizedBox(height: 24),
                           const Text(
                             'CMC.CENTER',
@@ -426,6 +401,95 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
                     ),
                   ),
                 ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Official Circular CMC.CENTER Logo Widget
+class CmcLogoWidget extends StatelessWidget {
+  final double size;
+
+  const CmcLogoWidget({super.key, this.size = 88});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: const Color(0xFF0A0A0A),
+        border: Border.all(
+          color: const Color(0xFF1E3A8A).withValues(alpha: 0.6),
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF00F0FF).withValues(alpha: 0.35),
+            blurRadius: 30,
+            spreadRadius: 4,
+          ),
+        ],
+      ),
+      child: ClipOval(
+        child: Image.asset(
+          'assets/icon.png',
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          errorBuilder: (context, error, stackTrace) => Stack(
+            alignment: Alignment.center,
+            children: [
+              Container(
+                margin: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: const Color(0xFF1E40AF).withValues(alpha: 0.4),
+                    width: 1.0,
+                  ),
+                ),
+              ),
+              Transform.translate(
+                offset: const Offset(-1.5, 0),
+                child: Text(
+                  'CMC',
+                  style: TextStyle(
+                    fontFamily: 'Arial',
+                    fontWeight: FontWeight.w900,
+                    fontSize: size * 0.38,
+                    color: const Color(0xFF00F0FF),
+                    letterSpacing: -1.5,
+                  ),
+                ),
+              ),
+              Transform.translate(
+                offset: const Offset(1.5, 0),
+                child: Text(
+                  'CMC',
+                  style: TextStyle(
+                    fontFamily: 'Arial',
+                    fontWeight: FontWeight.w900,
+                    fontSize: size * 0.38,
+                    color: const Color(0xFFFFB000),
+                    letterSpacing: -1.5,
+                  ),
+                ),
+              ),
+              Text(
+                'CMC',
+                style: TextStyle(
+                  fontFamily: 'Arial',
+                  fontWeight: FontWeight.w900,
+                  fontSize: size * 0.38,
+                  color: Colors.white,
+                  letterSpacing: -1.5,
+                ),
+              ),
             ],
           ),
         ),

@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -59,10 +61,233 @@ Future<void> _initNotifications() async {
   }
 }
 
+Future<void> _showLocalNotification({
+  required int id,
+  required String title,
+  required String body,
+  String? payload,
+}) async {
+  try {
+    const AndroidNotificationDetails androidPlatformChannelSpecifics =
+        AndroidNotificationDetails(
+      'cmc_center_notifications',
+      'CMC.CENTER Értesítések',
+      channelDescription: 'Valós idejű push értesítések és rendszerriasztások',
+      importance: Importance.max,
+      priority: Priority.high,
+      showWhen: true,
+      playSound: true,
+      enableVibration: true,
+      color: Color(0xFF00F0FF),
+      icon: '@mipmap/ic_launcher',
+    );
+
+    const DarwinNotificationDetails darwinPlatformChannelSpecifics =
+        DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    );
+
+    const NotificationDetails platformChannelSpecifics = NotificationDetails(
+      android: androidPlatformChannelSpecifics,
+      iOS: darwinPlatformChannelSpecifics,
+    );
+
+    await flutterLocalNotificationsPlugin.show(
+      id: id,
+      title: title,
+      body: body,
+      notificationDetails: platformChannelSpecifics,
+      payload: payload,
+    );
+  } catch (e) {
+    debugPrint('[CMC NOTIFICATIONS] Show error: $e');
+  }
+}
+
+/// Native Dart Background Notification Poller
+class CmcNotificationPoller {
+  static const String apiUrl = 'https://center.cisztermedia-szfvar.hu';
+  static const String apiAuthKey = 'cmc-super-secret-key-2026';
+
+  Timer? _timer;
+  final Set<String> _seenAlertIds = <String>{};
+  final Set<String> _seenMessageIds = <String>{};
+  bool _initialized = false;
+  String? currentUsername;
+  String? currentUserId;
+  String? currentUserRole;
+
+  void start() {
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 5), (_) => poll());
+    poll();
+  }
+
+  void stop() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  void syncUser({String? username, String? id, String? role}) {
+    currentUsername = username;
+    currentUserId = id;
+    currentUserRole = role;
+  }
+
+  Future<void> poll() async {
+    try {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 4);
+
+      // 1. Poll CMC alerts & broadcasts
+      final alertsReq =
+          await client.getUrl(Uri.parse('$apiUrl/api/db/cmc_alerts'));
+      alertsReq.headers.set('x-cmc-auth', apiAuthKey);
+      final alertsRes = await alertsReq.close();
+      if (alertsRes.statusCode == 200) {
+        final alertsBody = await alertsRes.transform(utf8.decoder).join();
+        final dynamic decoded = jsonDecode(alertsBody);
+        if (decoded is List) {
+          _processAlerts(decoded);
+        }
+      }
+
+      // 2. Poll private messages if user is known
+      if (currentUsername != null || currentUserId != null) {
+        final msgsReq =
+            await client.getUrl(Uri.parse('$apiUrl/api/db/cmc_messages'));
+        msgsReq.headers.set('x-cmc-auth', apiAuthKey);
+        final msgsRes = await msgsReq.close();
+        if (msgsRes.statusCode == 200) {
+          final msgsBody = await msgsRes.transform(utf8.decoder).join();
+          final dynamic decoded = jsonDecode(msgsBody);
+          if (decoded is List) {
+            _processMessages(decoded);
+          }
+        }
+      }
+    } catch (_) {
+      // Ignore network timeouts silently
+    }
+  }
+
+  void _processAlerts(List<dynamic> alerts) {
+    if (!_initialized) {
+      // Seed IDs on startup so we don't spam old alerts
+      for (final a in alerts) {
+        if (a is Map && a['id'] != null) {
+          _seenAlertIds.add(a['id'].toString());
+        }
+      }
+      _initialized = true;
+      return;
+    }
+
+    for (final a in alerts) {
+      if (a is! Map) continue;
+      final String idStr = a['id']?.toString() ?? '';
+      if (idStr.isEmpty || _seenAlertIds.contains(idStr)) continue;
+
+      _seenAlertIds.add(idStr);
+
+      final String rawMessage = a['message']?.toString() ?? '';
+      if (rawMessage.isEmpty || rawMessage.startsWith('auditAlert|')) {
+        continue;
+      }
+
+      // Check recipient targeting
+      bool isTargeted = false;
+      final dynamic targetUsers = a['targetUsers'];
+      final dynamic targetRoles = a['targetRoles'];
+      final dynamic target = a['target'];
+      final bool targetAll = a['targetAll'] == true;
+
+      if (targetAll || target == 'all' || target == null) {
+        isTargeted = true;
+      } else if (currentUsername != null &&
+          targetUsers is List &&
+          targetUsers.contains(currentUsername)) {
+        isTargeted = true;
+      } else if (target == 'admin' && currentUserRole == 'admin') {
+        isTargeted = true;
+      } else if (currentUserRole != null &&
+          targetRoles is List &&
+          targetRoles.contains(currentUserRole)) {
+        isTargeted = true;
+      } else if (target == currentUsername) {
+        isTargeted = true;
+      } else {
+        isTargeted = target == null || target == 'all';
+      }
+
+      if (isTargeted) {
+        final cleanBody = _stripHtml(rawMessage);
+        final sender = a['sender']?.toString() ?? '';
+        final title = a['title']?.toString() ??
+            (sender.isNotEmpty
+                ? 'CMC Broadcast (@$sender)'
+                : 'CMC.CENTER Broadcast');
+
+        _showLocalNotification(
+          id: idStr.hashCode.abs(),
+          title: title,
+          body: cleanBody.isNotEmpty ? cleanBody : 'Új rendszerértesítés érkezett.',
+          payload: '/dashboard',
+        );
+      }
+    }
+  }
+
+  void _processMessages(List<dynamic> messages) {
+    for (final m in messages) {
+      if (m is! Map) continue;
+      final String idStr = m['id']?.toString() ?? '';
+      if (idStr.isEmpty || _seenMessageIds.contains(idStr)) continue;
+
+      _seenMessageIds.add(idStr);
+
+      final dynamic to = m['to'];
+      final String from = m['from']?.toString() ?? '';
+      if (from == currentUserId || from == currentUsername) continue;
+
+      bool isForMe = false;
+      if (to == currentUserId || to == currentUsername || to == 'all') {
+        isForMe = true;
+      } else if (to is List &&
+          (to.contains(currentUserId) || to.contains(currentUsername))) {
+        isForMe = true;
+      }
+
+      if (isForMe) {
+        final subject = m['subject']?.toString() ?? 'Új üzenet';
+        final body = _stripHtml(m['body']?.toString() ?? '');
+        _showLocalNotification(
+          id: idStr.hashCode.abs(),
+          title: 'Új üzenet: $subject',
+          body: body.length > 100 ? '${body.substring(0, 97)}...' : body,
+          payload: '/email-interface',
+        );
+      }
+    }
+  }
+
+  static String _stripHtml(String html) {
+    return html
+        .replaceAll(RegExp(r'<[^>]*>'), ' ')
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll('&amp;', '&')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Set system navigation and status bar style for sleek dark glassmorphism
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
@@ -110,11 +335,12 @@ class CmcWebViewScreen extends StatefulWidget {
 
 class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
   late final WebViewController _controller;
-  bool _isLoading = true;
-  double _loadingProgress = 0.0;
-  bool _hasError = false;
+  final ValueNotifier<bool> _isLoading = ValueNotifier<bool>(true);
+  final ValueNotifier<double> _loadingProgress = ValueNotifier<double>(0.0);
+  final ValueNotifier<bool> _hasError = ValueNotifier<bool>(false);
   String _errorMessage = '';
   DateTime? _lastBackPressTime;
+  final CmcNotificationPoller _poller = CmcNotificationPoller();
 
   static const String _nativeBridgeJsScript = r'''
 (function() {
@@ -214,7 +440,6 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
       permissionState: function() { return Promise.resolve('granted'); }
     };
 
-    // Safely augment ServiceWorkerRegistration prototype if available
     if (typeof ServiceWorkerRegistration !== 'undefined') {
       try {
         Object.defineProperty(ServiceWorkerRegistration.prototype, 'pushManager', {
@@ -224,7 +449,6 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
       } catch(e) {}
     }
 
-    // Safely attach to navigator.serviceWorker.ready if available
     if (typeof navigator !== 'undefined' && navigator.serviceWorker && navigator.serviceWorker.ready) {
       navigator.serviceWorker.ready.then(function(reg) {
         if (reg && !reg.pushManager) {
@@ -233,25 +457,61 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
       }).catch(function() {});
     }
 
-    // 3. Connect real-time alert and toast notifications to phone notification tray
-    if (typeof window.addToast === 'function') {
-      var origAddToast = window.addToast;
-      window.addToast = function(msg, type) {
-        origAddToast(msg, type);
+    // 3. User Sync to Dart
+    function syncLoggedInUser() {
+      try {
+        var savedUser = localStorage.getItem('cmc_logged_in_user');
+        if (savedUser && window.CmcNativeBridge) {
+          window.CmcNativeBridge.postMessage(JSON.stringify({
+            type: 'USER_SYNC',
+            username: savedUser
+          }));
+        }
+      } catch(e) {}
+    }
+    syncLoggedInUser();
+    setInterval(syncLoggedInUser, 10000);
+
+    // 4. Intercept API Alert & Broadcast fetches directly in the browser
+    var origFetch = window.fetch;
+    if (origFetch) {
+      window.fetch = async function() {
+        var res = await origFetch.apply(this, arguments);
         try {
-          if (window.CmcNativeBridge && localStorage.getItem('push_notifications_enabled') !== 'false') {
-            window.CmcNativeBridge.postMessage(JSON.stringify({
-              type: 'SHOW_NOTIFICATION',
-              title: 'CMC.CENTER',
-              body: msg || 'Új értesítés',
-              data: { url: '/' }
-            }));
+          var url = typeof arguments[0] === 'string' ? arguments[0] : (arguments[0] && arguments[0].url) || '';
+          if (url.indexOf('/api/db/cmc_alerts') !== -1 || url.indexOf('/api/alerts') !== -1) {
+            res.clone().json().then(function(alerts) {
+              if (Array.isArray(alerts) && alerts.length > 0) {
+                if (window._cmcLastAlertId === undefined) {
+                  window._cmcLastAlertId = alerts[0].id;
+                  return;
+                }
+                for (var i = 0; i < alerts.length; i++) {
+                  var a = alerts[i];
+                  if (a && a.id > window._cmcLastAlertId) {
+                    window._cmcLastAlertId = a.id;
+                    if (a.message && a.message.indexOf('auditAlert|') === -1) {
+                      var clean = a.message.replace(/<[^>]*>/g, '').trim();
+                      if (window.CmcNativeBridge) {
+                        window.CmcNativeBridge.postMessage(JSON.stringify({
+                          type: 'SHOW_NOTIFICATION',
+                          title: a.title || (a.sender ? 'CMC Broadcast (@' + a.sender + ')' : 'CMC.CENTER Broadcast'),
+                          body: clean,
+                          data: { url: '/dashboard' }
+                        }));
+                      }
+                    }
+                  }
+                }
+              }
+            }).catch(function() {});
           }
         } catch(e) {}
+        return res;
       };
     }
 
-    // 4. Global testing method
+    // 5. Global helper for manual test trigger
     window.sendCmcNativePush = function(title, body, url) {
       new window.Notification(title || 'CMC.CENTER', {
         body: body || 'Teszt értesítés a natív appból',
@@ -259,7 +519,7 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
       });
     };
 
-    console.log('[CMC NATIVE] ✅ Notification and Web Push Bridge active.');
+    console.log('[CMC NATIVE] ✅ Full Web Push & Broadcast Bridge active.');
   } catch(err) {
     console.warn('[CMC NATIVE BRIDGE] Initialization note:', err);
   }
@@ -273,10 +533,15 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
     _initNotifications();
     _requestAppPermissions();
     _initializeWebViewController();
+    _poller.start();
   }
 
   @override
   void dispose() {
+    _poller.stop();
+    _isLoading.dispose();
+    _loadingProgress.dispose();
+    _hasError.dispose();
     _globalNotificationNavigate = null;
     super.dispose();
   }
@@ -293,7 +558,6 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
 
   Future<void> _requestAppPermissions() async {
     try {
-      // Request camera, mic for Face ID biometrics and notifications
       await [
         Permission.camera,
         Permission.microphone,
@@ -301,51 +565,6 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
       ].request();
     } catch (e) {
       debugPrint('Permission request error: $e');
-    }
-  }
-
-  Future<void> _showLocalNotification({
-    required int id,
-    required String title,
-    required String body,
-    String? payload,
-  }) async {
-    try {
-      const AndroidNotificationDetails androidPlatformChannelSpecifics =
-          AndroidNotificationDetails(
-        'cmc_center_notifications',
-        'CMC.CENTER Értesítések',
-        channelDescription: 'Valós idejű push értesítések és rendszerriasztások',
-        importance: Importance.max,
-        priority: Priority.high,
-        showWhen: true,
-        playSound: true,
-        enableVibration: true,
-        color: Color(0xFF00F0FF),
-        icon: '@mipmap/ic_launcher',
-      );
-
-      const DarwinNotificationDetails darwinPlatformChannelSpecifics =
-          DarwinNotificationDetails(
-        presentAlert: true,
-        presentBadge: true,
-        presentSound: true,
-      );
-
-      const NotificationDetails platformChannelSpecifics = NotificationDetails(
-        android: androidPlatformChannelSpecifics,
-        iOS: darwinPlatformChannelSpecifics,
-      );
-
-      await flutterLocalNotificationsPlugin.show(
-        id: id,
-        title: title,
-        body: body,
-        notificationDetails: platformChannelSpecifics,
-        payload: payload,
-      );
-    } catch (e) {
-      debugPrint('[CMC NOTIFICATIONS] Show error: $e');
     }
   }
 
@@ -371,12 +590,17 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
           body: body,
           payload: url,
         );
+      } else if (type == 'USER_SYNC') {
+        final String username = data['username'] ?? '';
+        final String id = data['id'] ?? '';
+        final String role = data['role'] ?? '';
+        _poller.syncUser(username: username, id: id, role: role);
       } else if (type == 'PUSH_SUBSCRIBE') {
         debugPrint('[CMC NATIVE] Push subscribed: ${data['endpoint']}');
         await _showLocalNotification(
           id: 9991,
           title: 'CMC.CENTER',
-          body: 'Push értesítések sikeresen összekapcsolva a natív appal!',
+          body: 'Push értesítések sikeresen bekapcsolva a natív appban!',
           payload: '/profile',
         );
       } else if (type == 'PUSH_UNSUBSCRIBE') {
@@ -420,38 +644,28 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
       ..setNavigationDelegate(
         NavigationDelegate(
           onProgress: (int progress) {
-            setState(() {
-              _loadingProgress = progress / 100.0;
-            });
+            _loadingProgress.value = progress / 100.0;
           },
           onPageStarted: (String url) {
-            setState(() {
-              _isLoading = true;
-              _hasError = false;
-              _errorMessage = '';
-            });
+            _isLoading.value = true;
+            _hasError.value = false;
+            _errorMessage = '';
           },
           onPageFinished: (String url) {
-            setState(() {
-              _isLoading = false;
-            });
+            _isLoading.value = false;
             _injectBridgeScript();
           },
           onWebResourceError: (WebResourceError error) {
-            // Only flag critical main-frame failures (not sub-resource or image 404s)
             if (error.isForMainFrame ?? true) {
-              setState(() {
-                _hasError = true;
-                _isLoading = false;
-                _errorMessage = error.description;
-              });
+              _hasError.value = true;
+              _isLoading.value = false;
+              _errorMessage = error.description;
             }
           },
           onNavigationRequest: (NavigationRequest request) async {
             final uri = Uri.tryParse(request.url);
             if (uri == null) return NavigationDecision.prevent;
 
-            // Handle special mobile schemes (phone, email, SMS, maps)
             if (uri.scheme == 'tel' ||
                 uri.scheme == 'mailto' ||
                 uri.scheme == 'sms' ||
@@ -463,7 +677,6 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
               return NavigationDecision.prevent;
             }
 
-            // Allow all internal CMC.CENTER domain navigation and sub-paths
             if (uri.host.contains('cisztermedia-szfvar.hu') ||
                 uri.host.contains('script.google.com') ||
                 uri.host.contains('accounts.google.com') ||
@@ -471,7 +684,6 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
               return NavigationDecision.navigate;
             }
 
-            // External links can be handled in external browser
             if (request.isMainFrame && !uri.host.contains('cisztermedia')) {
               if (await canLaunchUrl(uri)) {
                 await launchUrl(uri, mode: LaunchMode.externalApplication);
@@ -484,10 +696,10 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
         ),
       );
 
-    // Platform-specific enhancements for Android WebRTC / Camera & Geo
     if (controller.platform is AndroidWebViewController) {
       final androidController = controller.platform as AndroidWebViewController;
       androidController.setMediaPlaybackRequiresUserGesture(false);
+      androidController.setOverScrollMode(WebViewOverScrollMode.never);
       androidController.setOnPlatformPermissionRequest((request) {
         request.grant();
       });
@@ -531,7 +743,6 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
       return;
     }
 
-    // Exit app
     SystemNavigator.pop();
   }
 
@@ -551,174 +762,190 @@ class _CmcWebViewScreenState extends State<CmcWebViewScreen> {
           bottom: false,
           child: Stack(
             children: [
-              // Main WebView with pull-to-refresh
-              RefreshIndicator(
-                color: const Color(0xFF00F0FF),
-                backgroundColor: const Color(0xFF161B22),
-                onRefresh: () async {
-                  await _controller.reload();
+              // 1. High-Performance Native WebView (Zero RefreshIndicator overhead)
+              WebViewWidget(controller: _controller),
+
+              // 2. High-Tech Cyan Progress Bar (Isolated listener - zero WebView rebuilds)
+              ValueListenableBuilder<bool>(
+                valueListenable: _isLoading,
+                builder: (context, isLoading, _) {
+                  if (!isLoading) return const SizedBox.shrink();
+                  return ValueListenableBuilder<double>(
+                    valueListenable: _loadingProgress,
+                    builder: (context, progress, _) {
+                      return Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        child: LinearProgressIndicator(
+                          value: progress < 1.0 ? progress : null,
+                          backgroundColor: Colors.transparent,
+                          valueColor: const AlwaysStoppedAnimation<Color>(
+                            Color(0xFF00F0FF),
+                          ),
+                          minHeight: 2.5,
+                        ),
+                      );
+                    },
+                  );
                 },
-                child: WebViewWidget(controller: _controller),
               ),
 
-              // Top progress bar during page transitions
-              if (_isLoading && _loadingProgress < 1.0)
-                Positioned(
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  child: LinearProgressIndicator(
-                    value: _loadingProgress,
-                    backgroundColor: Colors.transparent,
-                    valueColor: const AlwaysStoppedAnimation<Color>(
-                      Color(0xFF00F0FF),
-                    ),
-                    minHeight: 2.5,
-                  ),
-                ),
-
-              // Fullscreen splash / loading overlay (displayed while the page is actively loading)
-              if (_isLoading && !_hasError)
-                Positioned.fill(
-                  child: Container(
-                    color: const Color(0xFF0D1117),
-                    child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const CmcLogoWidget(size: 96),
-                          const SizedBox(height: 24),
-                          const Text(
-                            'CMC.CENTER',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 20,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 2.0,
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            'Kapcsolódás a védett hálózathoz...',
-                            style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.6),
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          const SizedBox(height: 20),
-                          const SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2.5,
-                              valueColor: AlwaysStoppedAnimation<Color>(
-                                Color(0xFF00F0FF),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-
-              // High-tech offline / connection error screen
-              if (_hasError)
-                Positioned.fill(
-                  child: Container(
-                    color: const Color(0xFF0D1117),
-                    padding: const EdgeInsets.symmetric(horizontal: 28),
-                    child: Center(
-                      child: Container(
-                        padding: const EdgeInsets.all(24),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF161B22),
-                          borderRadius: BorderRadius.circular(24),
-                          border: Border.all(
-                            color: const Color(0xFFEF4444).withValues(alpha: 0.4),
-                            width: 1.5,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.6),
-                              blurRadius: 30,
-                              offset: const Offset(0, 10),
-                            ),
-                          ],
-                        ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.all(14),
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: const Color(0xFFEF4444).withValues(alpha: 0.15),
-                              ),
-                              child: const Icon(
-                                Icons.wifi_off_rounded,
-                                size: 40,
-                                color: Color(0xFFEF4444),
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            const Text(
-                              'Kapcsolati Hiba',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              _errorMessage.isNotEmpty
-                                  ? _errorMessage
-                                  : 'A CMC.CENTER szerver jelenleg nem érhető el vagy nincs internetkapcsolat.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.7),
-                                fontSize: 13,
-                                height: 1.4,
-                              ),
-                            ),
-                            const SizedBox(height: 24),
-                            SizedBox(
-                              width: double.infinity,
-                              child: ElevatedButton.icon(
-                                onPressed: () {
-                                  setState(() {
-                                    _hasError = false;
-                                    _isLoading = true;
-                                  });
-                                  _controller.reload();
-                                },
-                                icon: const Icon(Icons.refresh_rounded, size: 18),
-                                label: const Text(
-                                  'ÚJRAPRÓBÁLKOZÁS',
+              // 3. Fullscreen splash / loading overlay (Disappears cleanly on page finish)
+              ValueListenableBuilder<bool>(
+                valueListenable: _isLoading,
+                builder: (context, isLoading, _) {
+                  return ValueListenableBuilder<bool>(
+                    valueListenable: _hasError,
+                    builder: (context, hasError, _) {
+                      if (!isLoading || hasError) return const SizedBox.shrink();
+                      return Positioned.fill(
+                        child: Container(
+                          color: const Color(0xFF0D1117),
+                          child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const CmcLogoWidget(size: 96),
+                                const SizedBox(height: 24),
+                                const Text(
+                                  'CMC.CENTER',
                                   style: TextStyle(
-                                    fontWeight: FontWeight.w800,
-                                    letterSpacing: 0.8,
+                                    color: Colors.white,
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 2.0,
                                   ),
                                 ),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFF2563EB),
-                                  foregroundColor: Colors.white,
-                                  padding: const EdgeInsets.symmetric(vertical: 14),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(14),
+                                const SizedBox(height: 6),
+                                Text(
+                                  'Kapcsolódás a védett hálózathoz...',
+                                  style: TextStyle(
+                                    color: Colors.white.withValues(alpha: 0.6),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
                                   ),
-                                  elevation: 4,
+                                ),
+                                const SizedBox(height: 20),
+                                const SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.5,
+                                    valueColor: AlwaysStoppedAnimation<Color>(
+                                      Color(0xFF00F0FF),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+
+              // 4. High-tech offline / connection error screen
+              ValueListenableBuilder<bool>(
+                valueListenable: _hasError,
+                builder: (context, hasError, _) {
+                  if (!hasError) return const SizedBox.shrink();
+                  return Positioned.fill(
+                    child: Container(
+                      color: const Color(0xFF0D1117),
+                      padding: const EdgeInsets.symmetric(horizontal: 28),
+                      child: Center(
+                        child: Container(
+                          padding: const EdgeInsets.all(24),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF161B22),
+                            borderRadius: BorderRadius.circular(24),
+                            border: Border.all(
+                              color: const Color(0xFFEF4444).withValues(alpha: 0.4),
+                              width: 1.5,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.6),
+                                blurRadius: 30,
+                                offset: const Offset(0, 10),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(14),
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: const Color(0xFFEF4444).withValues(alpha: 0.15),
+                                ),
+                                child: const Icon(
+                                  Icons.wifi_off_rounded,
+                                  size: 40,
+                                  color: Color(0xFFEF4444),
                                 ),
                               ),
-                            ),
-                          ],
+                              const SizedBox(height: 16),
+                              const Text(
+                                'Kapcsolati Hiba',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                _errorMessage.isNotEmpty
+                                    ? _errorMessage
+                                    : 'A CMC.CENTER szerver jelenleg nem érhető el vagy nincs internetkapcsolat.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.7),
+                                  fontSize: 13,
+                                  height: 1.4,
+                                ),
+                              ),
+                              const SizedBox(height: 24),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton.icon(
+                                  onPressed: () {
+                                    _hasError.value = false;
+                                    _isLoading.value = true;
+                                    _controller.reload();
+                                  },
+                                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                                  label: const Text(
+                                    'ÚJRAPRÓBÁLKOZÁS',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      letterSpacing: 0.8,
+                                    ),
+                                  ),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF2563EB),
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(vertical: 14),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                    elevation: 4,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ),
+                  );
+                },
+              ),
             ],
           ),
         ),
